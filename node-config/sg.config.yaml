@@ -1,3 +1,3 @@
 # Template for /etc/rancher/k3s/config.yaml on the sg node (k3s-tencent-sg-1).
-# __NODE_IP__ is filled from NODE_IP_SG in .env by `make node-config NODE=sg`.
+# __NODE_IP__ is filled from NODE_IP_SG in secrets.enc.env by `make node-config NODE=sg`.
 node-external-ip: __NODE_IP__

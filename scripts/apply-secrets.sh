@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
-# Recreate (or rotate) the cluster's Secrets from values in .env.
-# .env is git-ignored; only .env.example is committed.
+# Recreate (or rotate) the cluster's Secrets from values in secrets.enc.env —
+# a sops-encrypted dotenv that IS committed to git (age-encrypted; .sops.yaml
+# holds the recipient). Decryption happens in-memory below: plaintext secrets
+# never touch disk or git.
 #
 # One block per app below — each owns its namespace's Secrets and validates only
 # its own variables, so bootstrapping the platform never depends on app secrets.
-# Uninstalling an app = delete its block here (+ its .env vars).
+# Uninstalling an app = delete its block here (+ its secrets.enc.env vars).
 #
 # Usage:
-#   cp .env.example .env                      # then edit .env and fill in values
+#   make secrets-edit                         # sops opens your editor: fill values
 #   ./scripts/apply-secrets.sh                # all blocks; one is skipped (with a
-#                                             #   note) if its key .env var is unset
+#                                             #   note) if its key var is unset
 #   ./scripts/apply-secrets.sh cert-manager   # just one block — hard-fails if its
 #   ./scripts/apply-secrets.sh multica ...    #   vars are missing (any of:
 #                                             #   cert-manager wallos multica supabase)
@@ -21,15 +23,28 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-if [[ ! -f .env ]]; then
-  echo "ERROR: .env not found. Run:  cp .env.example .env  and fill in values." >&2
+secrets_file="secrets.enc.env"
+
+command -v sops >/dev/null 2>&1 \
+  || { echo "ERROR: sops not found in PATH (brew install sops age)." >&2; exit 1; }
+if [[ ! -f "$secrets_file" ]]; then
+  echo "ERROR: $secrets_file not found. Bootstrap: make secrets-edit (see README — Secrets policy)." >&2
   exit 1
 fi
 
+# Capture first so a failed decrypt (missing/wrong age key) aborts loudly,
+# instead of silently sourcing nothing and "skipping" every block.
+env_clear="$(sops -d "$secrets_file")" || {
+  echo "ERROR: could not decrypt $secrets_file — is the age private key in place?" >&2
+  echo "       (macOS: '~/Library/Application Support/sops/age/keys.txt'; Linux: ~/.config/sops/age/keys.txt)" >&2
+  exit 1
+}
+# eval, not `source <(...)`: plaintext stays in-memory and it works on the
+# bash 3.2 that macOS ships (where sourcing a process substitution is a no-op).
 set -a
-# shellcheck disable=SC1091
-source .env
+eval "$env_clear"
 set +a
+unset env_clear
 
 ensure_ns() {
   kubectl create namespace "$1" --dry-run=client -o yaml | kubectl apply -f -
@@ -42,12 +57,12 @@ ensure_ns() {
 backup_r2_secret() {
   local ns="$1"
   if [[ -z "${BACKUP_R2_ACCESS_KEY_ID:-}" ]]; then
-    echo "    (backup-r2 skipped: BACKUP_R2_* not set in .env)"
+    echo "    (backup-r2 skipped: BACKUP_R2_* not set in secrets.enc.env)"
     return 0
   fi
-  : "${BACKUP_R2_SECRET_ACCESS_KEY:?set BACKUP_R2_SECRET_ACCESS_KEY in .env}"
-  : "${BACKUP_R2_BUCKET:?set BACKUP_R2_BUCKET in .env}"
-  : "${BACKUP_R2_ENDPOINT_URL:?set BACKUP_R2_ENDPOINT_URL in .env}"
+  : "${BACKUP_R2_SECRET_ACCESS_KEY:?set BACKUP_R2_SECRET_ACCESS_KEY in secrets.enc.env}"
+  : "${BACKUP_R2_BUCKET:?set BACKUP_R2_BUCKET in secrets.enc.env}"
+  : "${BACKUP_R2_ENDPOINT_URL:?set BACKUP_R2_ENDPOINT_URL in secrets.enc.env}"
   kubectl create secret generic backup-r2 \
     --namespace "$ns" \
     --from-literal=RCLONE_CONFIG_R2_ACCESS_KEY_ID="$BACKUP_R2_ACCESS_KEY_ID" \
@@ -59,7 +74,7 @@ backup_r2_secret() {
 
 # --- cert-manager (platform) -------------------------------------------------
 cert_manager_secrets() {
-  : "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env}"
+  : "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in secrets.enc.env}"
   echo "==> cert-manager / cloudflare-api-token"
   ensure_ns cert-manager
   kubectl create secret generic cloudflare-api-token \
@@ -83,11 +98,11 @@ wallos_secrets() {
 # so the non-secret GitHub SLUG/APP_ID ride here too (envFrom is the only hook). To turn
 # on Google OAuth / CloudFront later, add GOOGLE_CLIENT_SECRET / CLOUDFRONT_PRIVATE_KEY here.
 multica_secrets() {
-  : "${MULTICA_JWT_SECRET:?set MULTICA_JWT_SECRET in .env (openssl rand -hex 32)}"
-  : "${MULTICA_POSTGRES_PASSWORD:?set MULTICA_POSTGRES_PASSWORD in .env (openssl rand -hex 16)}"
+  : "${MULTICA_JWT_SECRET:?set MULTICA_JWT_SECRET in secrets.enc.env (openssl rand -hex 32)}"
+  : "${MULTICA_POSTGRES_PASSWORD:?set MULTICA_POSTGRES_PASSWORD in secrets.enc.env (openssl rand -hex 16)}"
   echo "==> multica / multica-secrets"
   ensure_ns multica
-  # The GitHub App private key is a multiline PEM kept base64 on one .env line; decode it
+  # The GitHub App private key is a multiline PEM kept base64 on one secrets.enc.env line; decode it
   # to a temp file so --from-file stores the exact PEM bytes (newlines intact).
   # Deliberately not `local`: the EXIT trap fires after the function returns.
   ghkey_tmp="$(mktemp)"
@@ -114,7 +129,7 @@ multica_secrets() {
 # classic symmetric-JWT (anon/service-key) auth model; the chart's kong-entrypoint
 # strips the empty key-auth credentials at boot.
 supabase_secrets() {
-  : "${SUPABASE_JWT_SECRET:?set the SUPABASE_* block in .env (run ./scripts/supabase-gen-secrets.sh)}"
+  : "${SUPABASE_JWT_SECRET:?set the SUPABASE_* block in secrets.enc.env (run ./scripts/supabase-gen-secrets.sh)}"
   : "${SUPABASE_ANON_KEY:?missing SUPABASE_ANON_KEY (re-run ./scripts/supabase-gen-secrets.sh)}"
   : "${SUPABASE_SERVICE_KEY:?missing SUPABASE_SERVICE_KEY (re-run ./scripts/supabase-gen-secrets.sh)}"
   : "${SUPABASE_DB_PASSWORD:?missing SUPABASE_DB_PASSWORD (re-run ./scripts/supabase-gen-secrets.sh)}"
@@ -181,7 +196,7 @@ if [[ $# -gt 0 ]]; then
     esac
   done
 else
-  # No args: apply every block whose key variable is set in .env, skip the rest.
+  # No args: apply every block whose key variable is set in secrets.enc.env, skip the rest.
   if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then cert_manager_secrets; else echo "==> cert-manager: skipped (CLOUDFLARE_API_TOKEN not set)"; fi
   if [[ -n "${BACKUP_R2_ACCESS_KEY_ID:-}" ]]; then wallos_secrets; else echo "==> wallos: skipped (BACKUP_R2_* not set)"; fi
   if [[ -n "${MULTICA_JWT_SECRET:-}" ]]; then multica_secrets; else echo "==> multica: skipped (MULTICA_JWT_SECRET not set)"; fi

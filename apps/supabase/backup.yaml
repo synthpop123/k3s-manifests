@@ -10,7 +10,7 @@
 #                      to r2:<bucket>/backups/supabase/, prunes copies older than 30d.
 #
 # R2 credentials come from the `backup-r2` Secret (scripts/apply-secrets.sh, from
-# BACKUP_R2_* in .env): its RCLONE_CONFIG_R2_* keys form a config-less rclone "r2"
+# BACKUP_R2_* in secrets.enc.env): its RCLONE_CONFIG_R2_* keys form a config-less rclone "r2"
 # remote via envFrom; the non-secret TYPE/PROVIDER pair is set here.
 apiVersion: batch/v1
 kind: CronJob

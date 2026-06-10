@@ -1,4 +1,6 @@
-# Secrets — never commit real values
+# Plaintext secrets — never commit these. (secrets.enc.env IS committed on
+# purpose: it's sops+age-encrypted, every value an ENC[...] blob; `make lint`
+# verifies that.)
 .env
 .env.*
 !.env.example

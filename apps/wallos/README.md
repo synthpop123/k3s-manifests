@@ -63,7 +63,7 @@ The whole state is the SQLite DB plus the logos dir. [`backup.yaml`](./backup.ya
 both up **automatically every night** (03:10 Asia/Shanghai): a CronJob mounts the two PVCs
 read-only, tars them in the pod's own layout (`db/`, `images/uploads/logos/`), uploads to
 R2 at `backups/wallos/wallos-<date>.tgz`, and prunes copies older than 30 days. R2
-credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `.env` → `make secrets`).
+credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `secrets.enc.env` → `make secrets`).
 
 ```bash
 make backup-now APP=wallos      # run a backup right now + print the log (lists the bucket)

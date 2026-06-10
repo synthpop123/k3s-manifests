@@ -1,3 +1,3 @@
 # Template for /etc/rancher/k3s/config.yaml on the amd2 node (k3s-ora-amd-2).
-# __NODE_IP__ is filled from NODE_IP_AMD2 in .env by `make node-config NODE=amd2`.
+# __NODE_IP__ is filled from NODE_IP_AMD2 in secrets.enc.env by `make node-config NODE=amd2`.
 node-external-ip: __NODE_IP__

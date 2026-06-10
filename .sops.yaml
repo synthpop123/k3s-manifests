@@ -1,0 +1,13 @@
+# SOPS config — picked up automatically by `sops` / `make secrets-edit`.
+#
+# Everything matching *.env (i.e. secrets.enc.env) is encrypted to the age
+# recipient below: values become ENC[...] blobs, keys and comments stay
+# readable. The matching PRIVATE key lives outside this repo at
+# ~/.config/sops/age/keys.txt on the control machine — back it up in your
+# password manager; repo + that one key is the whole disaster-recovery story.
+#
+# Rotate/add a machine: append its recipient here (comma-separated), then
+# re-encrypt the data key with  `sops updatekeys secrets.enc.env`.
+creation_rules:
+  - path_regex: \.env$
+    age: age1ay9wdtwhxz8l5ug0xdgamnase7kj5gdl5832upa7g2utgyy7jakq3fmhqr

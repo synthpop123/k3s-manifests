@@ -1,6 +1,6 @@
 # Supabase self-host values for the lkwplus.com k3s cluster.
 #
-# Deploy:  make secrets    # create the 8 supabase-* Secrets from .env (run first)
+# Deploy:  make secrets    # create the 8 supabase-* Secrets from secrets.enc.env (run first)
 #          make supabase   # `helm upgrade --install` with this file
 #
 # Upstream chart: supabase/supabase (https://supabase-community.github.io/supabase-kubernetes),
@@ -10,7 +10,7 @@
 #   helm show values supabase/supabase --version <v>
 
 # --- Secrets ---------------------------------------------------------------------------------
-# Every credential is created out-of-band by scripts/apply-secrets.sh from .env and referenced
+# Every credential is created out-of-band by scripts/apply-secrets.sh from secrets.enc.env and referenced
 # here by name, so nothing sensitive is ever templated into git. Each Secret uses the chart's
 # natural key names, so no secretRefKey remapping is needed.
 #
