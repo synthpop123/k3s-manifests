@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallos
+  namespace: wallos
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate                     # single RWO volume per claim — never run two pods at once
+  selector:
+    matchLabels:
+      app: wallos
+  template:
+    metadata:
+      labels:
+        app: wallos
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64      # pin to ARM: local-path data is node-local, pod must return here
+      containers:
+        - name: wallos
+          image: bellamy/wallos:4.9.5  # pinned, never :latest — bump via `make bump APP=wallos`
+          imagePullPolicy: IfNotPresent  # tag is immutable; a new tag (not a re-pull) is what upgrades
+          ports:
+            - containerPort: 80
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: db
+              mountPath: /var/www/html/db
+            - name: logos
+              mountPath: /var/www/html/images/uploads/logos
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: wallos-db
+        - name: logos
+          persistentVolumeClaim:
+            claimName: wallos-logos

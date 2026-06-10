@@ -1,0 +1,100 @@
+# Nightly backup of multica state (Postgres + uploaded files) to Cloudflare R2.
+#
+# NOT part of the Helm chart — applied by `make multica` alongside certificate.yaml.
+# Two stages share an emptyDir:
+#   1. init "dump":    pg_dump over the cluster network (multica-postgres:5432, the
+#                      same -U multica multica the README documents), gzipped.
+#   2. main "upload":  tars the uploads PVC (mounted read-only; same-node RWO
+#                      multi-attach is fine on local-path), rclone-copies both files
+#                      to r2:<bucket>/backups/multica/, prunes copies older than 30d.
+#
+# R2 credentials come from the `backup-r2` Secret (scripts/apply-secrets.sh, from
+# BACKUP_R2_* in .env): its RCLONE_CONFIG_R2_* keys form a config-less rclone "r2"
+# remote via envFrom; the non-secret TYPE/PROVIDER pair is set here.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: multica-backup
+  namespace: multica
+spec:
+  schedule: "30 3 * * *"            # staggered: wallos 03:10, multica 03:30, supabase 03:50
+  timeZone: Asia/Shanghai
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: multica-backup
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/arch: arm64    # uploads PV lives on ARM (its node affinity forces this anyway)
+          initContainers:
+            - name: dump
+              image: postgres:17-alpine  # pg_dump 17 client; server is pgvector pg17
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  set -o pipefail    # a failed pg_dump must fail the Job, not hide behind gzip's exit 0
+                  pg_dump -h multica-postgres -U multica multica | gzip > "/backup/multica-db-$(date +%F).sql.gz"
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: multica-secrets
+                      key: POSTGRES_PASSWORD
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          containers:
+            - name: upload
+              image: rclone/rclone:1.74.3
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date +%F)"
+                  tar czf "/backup/multica-uploads-${ts}.tgz" -C /data uploads
+                  rclone copy /backup "r2:${BACKUP_BUCKET}/backups/multica/"
+                  rclone delete "r2:${BACKUP_BUCKET}/backups/multica/" --min-age 30d
+                  echo "--- backups now in r2:${BACKUP_BUCKET}/backups/multica/ ---"
+                  rclone lsl "r2:${BACKUP_BUCKET}/backups/multica/"
+              env:
+                - name: RCLONE_CONFIG_R2_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_R2_PROVIDER
+                  value: Cloudflare
+                - name: RCLONE_CONFIG_R2_NO_CHECK_BUCKET
+                  value: "true"      # bucket-scoped R2 tokens may not HeadBucket/CreateBucket
+              envFrom:
+                - secretRef:
+                    name: backup-r2
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: uploads
+                  mountPath: /data/uploads
+                  readOnly: true
+          volumes:
+            - name: backup
+              emptyDir: {}
+            - name: uploads
+              persistentVolumeClaim:
+                claimName: multica-backend-uploads
+                readOnly: true

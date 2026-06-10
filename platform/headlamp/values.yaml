@@ -1,0 +1,21 @@
+# Helm values for Headlamp dashboard (chart: headlamp/headlamp; version pinned in the
+# root Makefile as HEADLAMP_CHART_VERSION — bump via `make bump APP=headlamp`).
+# Pins to ARM, exposes via Traefik Ingress at headlamp.lkwplus.com with an
+# auto-issued Let's Encrypt cert (cert-manager annotation below).
+# Install / upgrade:  make headlamp
+nodeSelector:
+  kubernetes.io/arch: arm64
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-cf
+  hosts:
+    - host: headlamp.lkwplus.com
+      paths:
+        - path: /
+          type: Prefix
+  tls:
+    - secretName: headlamp-tls
+      hosts:
+        - headlamp.lkwplus.com

@@ -1,0 +1,80 @@
+# Nightly backup of wallos state (SQLite db + uploaded logos) to Cloudflare R2.
+#
+# Mounts both PVCs read-only (same node as the app — local-path is node-local, so
+# same-node multi-attach of RWO claims is fine), tars them with the pod's own
+# directory layout (db/, images/uploads/logos/) so a restore is a plain untar into
+# /var/www/html (see README.md), uploads to r2:<bucket>/backups/wallos/, and prunes
+# copies older than 30 days.
+#
+# Wallos writes rarely, so tarring the live SQLite file at 03:10 is an accepted risk.
+#
+# R2 credentials come from the `backup-r2` Secret (scripts/apply-secrets.sh, from
+# BACKUP_R2_* in .env): its RCLONE_CONFIG_R2_* keys form a config-less rclone "r2"
+# remote via envFrom; the non-secret TYPE/PROVIDER pair is set here.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wallos-backup
+  namespace: wallos
+spec:
+  schedule: "10 3 * * *"            # staggered: wallos 03:10, multica 03:30, supabase 03:50
+  timeZone: Asia/Shanghai
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: wallos-backup
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/arch: arm64    # the PVs live on ARM (their node affinity forces this anyway)
+          containers:
+            - name: backup
+              image: rclone/rclone:1.74.3
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  ts="$(date +%F)"
+                  tar czf "/tmp/wallos-${ts}.tgz" -C /data db images/uploads/logos
+                  rclone copyto "/tmp/wallos-${ts}.tgz" "r2:${BACKUP_BUCKET}/backups/wallos/wallos-${ts}.tgz"
+                  rclone delete "r2:${BACKUP_BUCKET}/backups/wallos/" --min-age 30d
+                  echo "--- backups now in r2:${BACKUP_BUCKET}/backups/wallos/ ---"
+                  rclone lsl "r2:${BACKUP_BUCKET}/backups/wallos/"
+              env:
+                - name: RCLONE_CONFIG_R2_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_R2_PROVIDER
+                  value: Cloudflare
+                - name: RCLONE_CONFIG_R2_NO_CHECK_BUCKET
+                  value: "true"      # bucket-scoped R2 tokens may not HeadBucket/CreateBucket
+              envFrom:
+                - secretRef:
+                    name: backup-r2
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: db
+                  mountPath: /data/db
+                  readOnly: true
+                - name: logos
+                  mountPath: /data/images/uploads/logos
+                  readOnly: true
+          volumes:
+            - name: db
+              persistentVolumeClaim:
+                claimName: wallos-db
+                readOnly: true
+            - name: logos
+              persistentVolumeClaim:
+                claimName: wallos-logos
+                readOnly: true

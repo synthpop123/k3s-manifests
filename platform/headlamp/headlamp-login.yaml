@@ -1,0 +1,38 @@
+# Long-lived admin login for Headlamp.
+# A dedicated ServiceAccount bound to cluster-admin, plus a non-expiring
+# ServiceAccount-token Secret (Kubernetes auto-populates the token value;
+# nothing secret is stored in this file, so it is safe to commit).
+#
+# Prerequisite: the `headlamp` namespace must exist first
+# (created by `helm install headlamp ... --create-namespace`).
+# Apply: kubectl apply -f headlamp-login.yaml
+#
+# Read the token for login (run on a machine with kubectl access):
+#   kubectl -n headlamp get secret headlamp-login-token -o jsonpath='{.data.token}' | base64 -d
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp-login
+  namespace: headlamp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: headlamp-login
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: headlamp-login
+    namespace: headlamp
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: headlamp-login-token
+  namespace: headlamp
+  annotations:
+    kubernetes.io/service-account.name: headlamp-login
+type: kubernetes.io/service-account-token

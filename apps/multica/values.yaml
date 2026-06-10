@@ -1,0 +1,59 @@
+# Multica self-host values for the lkwplus.com k3s cluster.
+#
+# Deploy:  make secrets   # create the multica-secrets Secret from .env (run first)
+#          make multica   # apply the TLS cert + `helm upgrade --install` with this file
+#
+# Upstream chart: oci://ghcr.io/multica-ai/charts/multica (version pinned in the Makefile
+# as MULTICA_CHART_VERSION). This file overrides ONLY what differs from the chart
+# defaults; see the full surface with:
+#   helm show values oci://ghcr.io/multica-ai/charts/multica --version <v>
+
+# Pin both app images. Chart.appVersion is the mutable "latest", so we set explicit
+# tags here and bump them in lockstep with MULTICA_CHART_VERSION (see apps/multica/README.md).
+images:
+  backend:
+    tag: v0.3.18
+  frontend:
+    tag: v0.3.18
+
+# = chart default; the Secret is created out-of-band by scripts/apply-secrets.sh from
+# .env, so JWT / Postgres / Resend values never get templated into git.
+existingSecret: multica-secrets
+
+backend:
+  config:
+    # = default, pinned for safety: a public instance must stay in production so no
+    # fixed MULTICA_DEV_VERIFICATION_CODE is ever honored.
+    appEnv: production
+    appUrl: https://multica.lkwplus.com
+    # The backend rejects WebSocket upgrades whose Origin != frontendOrigin.
+    frontendOrigin: https://multica.lkwplus.com
+    # Non-secret From address; the RESEND_API_KEY lives in multica-secrets.
+    resendFromEmail: multica@lkwplus.com
+    # The browser fetches uploaded files straight from the backend host, so this must
+    # be the public api host (not the in-cluster Service).
+    localUploadBaseUrl: https://api.multica.lkwplus.com
+    # Pinned explicitly: the chart default is a dev placeholder (multica.dev.lan) and
+    # the deployed release carries the real host — `make diff` caught the 0.3.17 OCI
+    # tag being republished with a different default. Harmless while googleClientId
+    # is empty, but pinning keeps re-applies from silently rewriting it.
+    googleRedirectUri: https://multica.lkwplus.com/auth/callback
+    # First user is registered, so public signup is closed. The web reads this from
+    # /api/config at runtime; flip back to true (then `make multica`) to reopen.
+    allowSignup: false
+
+ingress:
+  enabled: true
+  className: traefik
+  frontend:
+    host: multica.lkwplus.com
+  backend:
+    host: api.multica.lkwplus.com
+  # No cert-manager ingress-shim annotation here on purpose: the chart applies this
+  # same tls block to BOTH ingresses, so a shared, explicit multi-SAN Certificate
+  # (apps/multica/certificate.yaml) avoids two ingresses racing to own one cert.
+  tls:
+    - hosts:
+        - multica.lkwplus.com
+        - api.multica.lkwplus.com
+      secretName: multica-tls

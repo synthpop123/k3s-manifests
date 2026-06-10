@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp
+  namespace: myapp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-cf   # auto-issues a Let's Encrypt cert
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - myapp.lkwplus.com
+      secretName: myapp-tls
+  rules:
+    - host: myapp.lkwplus.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80

@@ -1,0 +1,17 @@
+# Pin the k3s-bundled Traefik ingress controller to the ARM node.
+#
+# IMPORTANT: This file is NOT applied with `kubectl apply`.
+# k3s watches its auto-deploy directory and reconciles HelmChartConfig from there.
+# On the ARM (server) node this file lives at:
+#     /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+# The copy here is the source-of-truth / for rebuilds. To (re)apply, copy it to that
+# path on ARM; k3s picks it up automatically. Deleting it there reverts Traefik to defaults.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    nodeSelector:
+      kubernetes.io/arch: arm64

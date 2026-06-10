@@ -1,0 +1,17 @@
+# Secrets — never commit real values
+.env
+.env.*
+!.env.example
+*.secret.yaml
+*-secret.yaml
+*.key
+*.pem
+*.token
+
+# Kubeconfigs
+kubeconfig*
+*.kubeconfig
+
+# OS / editor junk
+.DS_Store
+*.swp

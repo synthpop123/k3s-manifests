@@ -1,0 +1,17 @@
+# Helm values for cert-manager (chart: jetstack/cert-manager; version pinned in the
+# root Makefile as CERT_MANAGER_CHART_VERSION — bump via `make bump APP=cert-manager`).
+# Pins every component to the ARM (arm64) node.
+# Install / upgrade:  make cert-manager
+crds:
+  enabled: true
+nodeSelector:
+  kubernetes.io/arch: arm64
+webhook:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+cainjector:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+startupapicheck:
+  nodeSelector:
+    kubernetes.io/arch: arm64
