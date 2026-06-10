@@ -1,6 +1,6 @@
 # Multica self-host values for the lkwplus.com k3s cluster.
 #
-# Deploy:  make secrets   # create the multica-secrets Secret from .env (run first)
+# Deploy:  make secrets   # create the multica-secrets Secret from secrets.enc.env (run first)
 #          make multica   # apply the TLS cert + `helm upgrade --install` with this file
 #
 # Upstream chart: oci://ghcr.io/multica-ai/charts/multica (version pinned in the Makefile
@@ -17,7 +17,7 @@ images:
     tag: v0.3.18
 
 # = chart default; the Secret is created out-of-band by scripts/apply-secrets.sh from
-# .env, so JWT / Postgres / Resend values never get templated into git.
+# secrets.enc.env, so JWT / Postgres / Resend values never get templated into git.
 existingSecret: multica-secrets
 
 backend:

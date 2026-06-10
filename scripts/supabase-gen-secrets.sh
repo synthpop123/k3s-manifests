@@ -5,12 +5,13 @@
 # Supabase needs a JWT secret PLUS two long-lived API keys (`anon`,
 # `service_role`) that are JWTs SIGNED by that same secret — they must stay
 # consistent or every client breaks. This script generates the secret, signs
-# both keys, and prints a complete, ready-to-paste block of `.env` lines along
+# both keys, and prints a complete, ready-to-paste block of dotenv lines along
 # with the other random tokens the stack needs.
 #
 # Usage:
-#   ./scripts/supabase-gen-secrets.sh            # generate a fresh set
-#   ./scripts/supabase-gen-secrets.sh >> .env    # append straight into .env
+#   ./scripts/supabase-gen-secrets.sh   # generate a fresh set, then paste the
+#                                       # block into the editor opened by
+#                                       # `make secrets-edit` (sops re-encrypts)
 #
 # Run it ONCE, keep the values (rotating SUPABASE_JWT_SECRET invalidates the
 # anon/service keys; rotating SUPABASE_DB_PASSWORD breaks the existing DB).

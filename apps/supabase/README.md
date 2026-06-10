@@ -42,16 +42,18 @@ SQL editor or via `kubectl port-forward` (see [Connect to Postgres](#connect-to-
   only large node (4 CPU / 24Gi vs ~1Gi on the amd/sg agents), and the DB + storage use
   node-local `local-path` PVCs, so the stateful pods must live where their data binds. See the
   root [`AGENTS.md`](../../AGENTS.md).
-- **Secrets out-of-git, one per concern.** Eight `supabase-*` Secrets (jwt, db, dashboard,
-  analytics, realtime, meta, s3, smtp) are created by
-  [`../../scripts/apply-secrets.sh`](../../scripts/apply-secrets.sh) from the git-ignored `.env`
+- **Secrets in git only encrypted, one per concern.** Eight `supabase-*` Secrets (jwt, db,
+  dashboard, analytics, realtime, meta, s3, smtp) are created by
+  [`../../scripts/apply-secrets.sh`](../../scripts/apply-secrets.sh) from the sops-encrypted
+  `secrets.enc.env`
   and referenced by name (`secret.<group>.secretRef`). Each uses the chart's natural key names,
   so no key remapping. The `apikey` secret is intentionally left empty — that keeps the classic
   **symmetric-JWT** auth model (anon / service keys); the chart's kong-entrypoint strips the
   empty credentials at boot.
 - **`anon` / `service_role` keys are JWTs signed by the JWT secret**, so they can't be random —
   [`../../scripts/supabase-gen-secrets.sh`](../../scripts/supabase-gen-secrets.sh) signs them
-  (10-year expiry) and rolls every other token, emitting a ready-to-paste `.env` block.
+  (10-year expiry) and rolls every other token, emitting a ready-to-paste dotenv block
+  (paste it into the editor opened by `make secrets-edit`).
 - **File storage backend** (MinIO disabled): uploads land on the `supabase-storage` PVC. The
   trade-off is image-transformation has no shared object store; flip on `minio.enabled` + the S3
   env if you need it later.
@@ -72,11 +74,11 @@ The Let's Encrypt cert is issued via Cloudflare DNS-01, so it succeeds even befo
 ## Deploy
 
 ```bash
-./scripts/supabase-gen-secrets.sh >> .env   # ONCE: append the SUPABASE_* block, then set
-                                            # SUPABASE_SMTP_PASSWORD to your Resend API key
-make repos                                  # adds the supabase helm repo (once per machine)
-make secrets                                # create the 8 supabase-* Secrets from .env
-make supabase                               # backup CronJob + helm upgrade --install with values.yaml
+./scripts/supabase-gen-secrets.sh   # ONCE: copy the SUPABASE_* block it prints, paste it into
+make secrets-edit                   #   the sops editor, set SUPABASE_SMTP_PASSWORD (Resend API key)
+make repos                          # adds the supabase helm repo (once per machine)
+make secrets                        # create the 8 supabase-* Secrets from secrets.enc.env
+make supabase                       # backup CronJob + helm upgrade --install with values.yaml
 ```
 
 `make supabase` returns once the resources are applied (no `--wait` — the stack has long init
@@ -91,10 +93,10 @@ curl -sS -o /dev/null -w "%{http_code}\n" https://supabase.lkwplus.com/   # 401 
 ## First login
 
 Open https://supabase.lkwplus.com — the browser prompts for the **dashboard** basic-auth
-credentials (this is Kong, not Supabase auth). They're in `.env`:
+credentials (this is Kong, not Supabase auth). They're in `secrets.enc.env`:
 
 ```bash
-grep -E '^SUPABASE_DASHBOARD_(USERNAME|PASSWORD)=' .env
+sops -d secrets.enc.env | grep -E '^SUPABASE_DASHBOARD_(USERNAME|PASSWORD)='
 # or read them back from the cluster:
 kubectl -n supabase get secret supabase-dashboard \
   -o jsonpath='{.data.username}' | base64 -d; echo
@@ -109,7 +111,7 @@ Apps connect with the project URL + an API key (sent as the `apikey` header and/
 
 - **Project URL:** `https://supabase.lkwplus.com`
 - **anon key** (browser/public, RLS-enforced) and **service_role key** (server-side, bypasses
-  RLS — keep secret) live in `.env` as `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_KEY`, or:
+  RLS — keep secret) live in `secrets.enc.env` as `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_KEY`, or:
 
 ```bash
 kubectl -n supabase get secret supabase-jwt -o jsonpath='{.data.anonKey}'    | base64 -d; echo
@@ -123,7 +125,7 @@ No public DB ingress by design. Port-forward and connect as `postgres` (password
 
 ```bash
 kubectl -n supabase port-forward svc/supabase-supabase-db 5432:5432
-PGPASSWORD="$(sed -n 's/^SUPABASE_DB_PASSWORD=//p' .env)" \
+PGPASSWORD="$(sops -d secrets.enc.env | sed -n 's/^SUPABASE_DB_PASSWORD=//p')" \
   psql -h 127.0.0.1 -U postgres postgres
 ```
 
@@ -148,7 +150,7 @@ and the storage uploads volume. [`backup.yaml`](./backup.yaml) backs both up
 whole cluster (all roles + databases) over the cluster network, the main container tars
 the storage PVC (read-only mount) and uploads both to R2 at `backups/supabase/` with
 30-day retention. It's applied by `make supabase` (it is NOT part of the Helm release).
-R2 credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `.env` → `make secrets`).
+R2 credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `secrets.enc.env` → `make secrets`).
 
 ```bash
 make backup-now APP=supabase    # run a backup right now + print the log (lists the bucket)
@@ -172,9 +174,9 @@ kubectl -n supabase exec -i deploy/supabase-supabase-storage -- tar xzf - -C /va
 All in [`values.yaml`](./values.yaml) → re-run `make supabase` to apply:
 
 - **Reopen signup:** `environment.auth.GOTRUE_DISABLE_SIGNUP: "false"`.
-- **Studio AI SQL assistant:** set `SUPABASE_OPENAI_API_KEY` in `.env` + `make secrets`.
-- **Rotate the dashboard password:** edit `SUPABASE_DASHBOARD_PASSWORD` in `.env`, `make secrets`,
-  then `kubectl -n supabase rollout restart deploy/supabase-supabase-kong`.
+- **Studio AI SQL assistant:** set `SUPABASE_OPENAI_API_KEY` via `make secrets-edit` + `make secrets`.
+- **Rotate the dashboard password:** edit `SUPABASE_DASHBOARD_PASSWORD` via `make secrets-edit`,
+  `make secrets`, then `kubectl -n supabase rollout restart deploy/supabase-supabase-kong`.
 
 ## Uninstall
 
@@ -186,8 +188,8 @@ kubectl delete namespace supabase     # also wipes the supabase-* Secrets
 The chart's PVCs are Helm-managed, so `helm uninstall` **deletes the database and uploads** —
 back up first. The `supabase-*` Secrets are created out-of-band (not Helm-managed) and survive an
 uninstall; deleting the namespace removes them. Then drop the `supabase` CNAME, remove the
-`SUPABASE_*` block from `.env` / `.env.example` / `apply-secrets.sh`, and delete this folder + its
-row in [`../README.md`](../README.md).
+`SUPABASE_*` block from `secrets.enc.env` (`make secrets-edit`) / `.env.example` /
+`apply-secrets.sh`, and delete this folder + its row in [`../README.md`](../README.md).
 
 ## Troubleshooting
 

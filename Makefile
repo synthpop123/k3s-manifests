@@ -1,16 +1,28 @@
 # Operate the lkwplus.com k3s cluster from this Mac.
 #
 # Prereqs (one-time):
-#   - kubectl + helm in PATH (brew install kubectl helm)
+#   - kubectl + helm + sops + age in PATH (brew install kubectl helm sops age)
 #   - kubeconfig pointing at k3s.lkwplus.com:6443  (kubectl get nodes works)
 #   - SSH aliases arm/amd1/amd2/sg in ~/.ssh/config (see README)
 #   - make repos        # add the helm repos platform/ needs
-#   - cp .env.example .env && edit it
+#   - the age private key at ~/.config/sops/age/keys.txt (restore it from your
+#     password manager; on a brand-new setup: age-keygen + update .sops.yaml)
+#   - `make lint` also wants kubeconform + shellcheck (brew install kubeconform
+#     shellcheck) — CI runs the same target on every push regardless.
 #
 # Run `make` with no target for the list.
 
+# bash, not sh: the lint recipes rely on `set -o pipefail`.
+SHELL := bash
+
 KUBECTL ?= kubectl
 HELM    ?= helm
+SOPS    ?= sops
+
+# All secret values + node IPs live ENCRYPTED (sops + age) in this committed
+# file; scripts/apply-secrets.sh and `make node-config` decrypt it on the fly.
+# Edit with `make secrets-edit` — never commit a plaintext .env.
+SECRETS_FILE ?= secrets.enc.env
 
 # Pinned upstream multica chart version; bump together with the image tags in
 # apps/multica/values.yaml (see apps/multica/README.md).
@@ -25,6 +37,19 @@ SUPABASE_CHART_VERSION ?= 0.5.6
 # / `make bump APP=headlamp` (or edit here), review the diff, then re-run the target.
 CERT_MANAGER_CHART_VERSION ?= v1.20.2
 HEADLAMP_CHART_VERSION     ?= 0.42.0
+
+# What `make lint` validates rendered manifests against: the cluster's k8s
+# version (bump together with the cluster) + the datree CRDs-catalog for the
+# few CRDs in use (cert-manager.io, helm.cattle.io). -strict rejects unknown
+# fields, so typos fail here instead of at apply time. CustomResourceDefinition
+# objects themselves are skipped: the upstream schema repo doesn't ship that
+# kind, and ours come verbatim from the cert-manager chart anyway.
+KUBECONFORM ?= kubeconform
+KUBECONFORM_K8S_VERSION ?= 1.35.0
+KUBECONFORM_FLAGS = -strict -summary -kubernetes-version $(KUBECONFORM_K8S_VERSION) \
+  -skip CustomResourceDefinition \
+  -schema-location default \
+  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 .DEFAULT_GOAL := help
 
@@ -76,20 +101,84 @@ diff: ## Preview drift between this repo and the live cluster (applies nothing)
 	  | diff platform/traefik/traefik-helmchartconfig.yaml - || [ $$? -eq 1 ]
 	@echo 'diff done — empty sections above mean no drift.'
 
+# --- validation (CI runs exactly this; see .github/workflows/ci.yml) ---------
+# A push-based repo has no admission gate between a YAML typo and the live
+# cluster, so lint is the gate: it proves everything we WOULD apply renders and
+# passes schema validation, without ever talking to the cluster.
+lint: lint-manifests lint-helm lint-scripts lint-secrets ## Run all repo checks: manifests, helm renders, scripts, secrets hygiene
+
+lint-manifests: ## kustomize-build apps/ + templates/ and validate them + all plain manifests (kubeconform)
+	@set -o pipefail; for d in apps/*/ templates/*/; do \
+	  if [ -f "$$d/kustomization.yaml" ]; then \
+	    echo "==> kustomize: $$d"; \
+	    $(KUBECTL) kustomize "$$d" | $(KUBECONFORM) $(KUBECONFORM_FLAGS) || exit 1; \
+	  fi; \
+	done
+	@echo '==> plain manifests (kubectl apply -f / k3s auto-deploy files)'
+	@keep=""; \
+	for f in $$(find apps platform -name '*.yaml' ! -name values.yaml ! -name kustomization.yaml | sort); do \
+	  [ -f "$$(dirname "$$f")/kustomization.yaml" ] || keep="$$keep $$f"; \
+	done; \
+	$(KUBECONFORM) $(KUBECONFORM_FLAGS) $$keep
+
+lint-helm: ## Render the four pinned charts with their values.yaml and validate (kubeconform; needs `make repos`)
+	@set -o pipefail; \
+	echo "==> helm template: cert-manager $(CERT_MANAGER_CHART_VERSION)"; \
+	$(HELM) template cert-manager jetstack/cert-manager \
+	  --version $(CERT_MANAGER_CHART_VERSION) --namespace cert-manager \
+	  -f platform/cert-manager/values.yaml | $(KUBECONFORM) $(KUBECONFORM_FLAGS)
+	@set -o pipefail; \
+	echo "==> helm template: headlamp $(HEADLAMP_CHART_VERSION)"; \
+	$(HELM) template headlamp headlamp/headlamp \
+	  --version $(HEADLAMP_CHART_VERSION) --namespace headlamp \
+	  -f platform/headlamp/values.yaml | $(KUBECONFORM) $(KUBECONFORM_FLAGS)
+	@set -o pipefail; \
+	echo "==> helm template: multica $(MULTICA_CHART_VERSION)"; \
+	$(HELM) template multica oci://ghcr.io/multica-ai/charts/multica \
+	  --version $(MULTICA_CHART_VERSION) --namespace multica \
+	  -f apps/multica/values.yaml | $(KUBECONFORM) $(KUBECONFORM_FLAGS)
+	@set -o pipefail; \
+	echo "==> helm template: supabase $(SUPABASE_CHART_VERSION)"; \
+	$(HELM) template supabase supabase/supabase \
+	  --version $(SUPABASE_CHART_VERSION) --namespace supabase \
+	  -f apps/supabase/values.yaml | $(KUBECONFORM) $(KUBECONFORM_FLAGS)
+
+lint-scripts: ## shellcheck every script in scripts/
+	shellcheck scripts/*.sh
+
+lint-secrets: ## Prove the committed secrets file leaks nothing: every value ENC[...] or empty
+	@if [ -f $(SECRETS_FILE) ]; then \
+	  bad=$$(grep -Ev '^[[:space:]]*(#|$$)' $(SECRETS_FILE) | grep -v '^sops_' \
+	    | grep -Ev '=ENC\[' | grep -Ev '^[A-Za-z_][A-Za-z0-9_]*=$$' || true); \
+	  if [ -n "$$bad" ]; then \
+	    echo "ERROR: plaintext value(s) in $(SECRETS_FILE) (keys shown, values hidden):"; \
+	    echo "$$bad" | sed 's/=.*/=<plaintext!>/'; \
+	    exit 1; \
+	  fi; \
+	  echo "OK: every value in $(SECRETS_FILE) is encrypted"; \
+	else \
+	  echo "skip: no $(SECRETS_FILE) in the working tree"; \
+	fi
+
 # --- one-time setup ---------------------------------------------------------
-repos: ## Add/refresh the helm repos + helm-diff plugin used by this repo (run once per machine)
+helm-repos: ## Add/refresh the helm repos the pinned charts come from (no plugins; what CI uses)
 	$(HELM) repo add jetstack https://charts.jetstack.io
 	$(HELM) repo add headlamp https://kubernetes-sigs.github.io/headlamp/
 	$(HELM) repo add supabase https://supabase-community.github.io/supabase-kubernetes
 	$(HELM) repo update
+
+repos: helm-repos ## helm-repos + the helm-diff plugin `make diff` needs (run once per machine)
 	@$(HELM) plugin list | grep -q '^diff' \
 	  || $(HELM) plugin install --verify=false https://github.com/databus23/helm-diff  # helm-diff ships no provenance (helm >=4 verifies by default)
 
-secrets: ## Create/rotate in-cluster Secrets from .env (all apps; or one: APP=cert-manager|wallos|multica|supabase)
+secrets: ## Create/rotate in-cluster Secrets from secrets.enc.env (all apps; or one: APP=cert-manager|wallos|multica|supabase)
 	./scripts/apply-secrets.sh $(APP)
 
 secrets-platform: ## Create just the platform Secrets (cloudflare-api-token for cert-manager)
 	./scripts/apply-secrets.sh cert-manager
+
+secrets-edit: ## Edit the encrypted secrets file: sops decrypts into your editor, re-encrypts on save
+	$(SOPS) $(SECRETS_FILE)
 
 # --- platform components ----------------------------------------------------
 cert-manager: ## Upgrade/install cert-manager (pinned chart) + its ClusterIssuer
@@ -113,15 +202,16 @@ traefik: ## Push the Traefik ARM-pin config to the server node (k3s auto-deploys
 platform: repos secrets-platform cert-manager headlamp traefik ## Bootstrap/refresh ALL platform components (correct order)
 
 # --- node config ------------------------------------------------------------
-# node-config/*.config.yaml are templates: __NODE_IP__ is filled at apply time from
-# the matching NODE_IP_* variable in .env (public IPs stay out of git) and the
-# rendered file is streamed straight onto the node — nothing is written locally.
-node-config: ## Render node-config/<NODE>.config.yaml from .env, push & restart k3s (NODE=arm|amd1|amd2|sg)
+# node-config/*.config.yaml are templates: __NODE_IP__ is filled at apply time
+# from the matching NODE_IP_* variable in secrets.enc.env (public IPs stay out
+# of git in plaintext — sops decrypts them on the fly) and the rendered file is
+# streamed straight onto the node — nothing is written locally.
+node-config: ## Render node-config/<NODE>.config.yaml (IP decrypted via sops), push & restart k3s (NODE=arm|amd1|amd2|sg)
 	@test -n "$(NODE)" || { echo "usage: make node-config NODE=arm|amd1|amd2|sg"; exit 1; }
-	@test -f .env || { echo "ERROR: .env not found (cp .env.example .env and fill NODE_IP_*)"; exit 1; }
+	@test -f $(SECRETS_FILE) || { echo "ERROR: $(SECRETS_FILE) not found (see README — Secrets policy)"; exit 1; }
 	@var="NODE_IP_$$(echo $(NODE) | tr a-z A-Z)"; \
-	ip="$$(sed -n "s/^$$var=//p" .env | tail -1)"; \
-	test -n "$$ip" || { echo "ERROR: $$var is not set in .env"; exit 1; }; \
+	ip="$$($(SOPS) -d $(SECRETS_FILE) | sed -n "s/^$$var=//p" | tail -1)"; \
+	test -n "$$ip" || { echo "ERROR: $$var is not set in $(SECRETS_FILE)"; exit 1; }; \
 	ssh $(NODE) 'mkdir -p /etc/rancher/k3s' && \
 	sed "s/__NODE_IP__/$$ip/" node-config/$(NODE).config.yaml | ssh $(NODE) 'cat > /etc/rancher/k3s/config.yaml' && \
 	ssh $(NODE) 'systemctl restart $(if $(filter arm,$(NODE)),k3s,k3s-agent)'
@@ -167,4 +257,4 @@ backup-now: ## Run an app's nightly R2 backup right now (APP=wallos|multica|supa
 headlamp-token: ## Print the Headlamp admin login token
 	@$(KUBECTL) -n headlamp get secret headlamp-login-token -o jsonpath='{.data.token}' | base64 -d; echo
 
-.PHONY: help status diff repos secrets secrets-platform cert-manager headlamp traefik platform node-config app app-pull bump multica supabase backup-now headlamp-token
+.PHONY: help status diff lint lint-manifests lint-helm lint-scripts lint-secrets repos helm-repos secrets secrets-platform secrets-edit cert-manager headlamp traefik platform node-config app app-pull bump multica supabase backup-now headlamp-token

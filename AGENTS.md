@@ -7,7 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The version-controlled source-of-truth for the **lkwplus.com k3s cluster**: platform
 components, deployed apps, per-node k3s settings, and a template for new apps. It contains
 no application code — only YAML manifests, Helm `values.yaml`, k3s node config, and a few
-shell scripts in `scripts/`. There is no build, test, or lint step.
+shell scripts in `scripts/`. There is no build or test step, but there IS a lint step:
+`make lint` (kustomize builds + the four pinned Helm releases rendered and validated by
+`kubeconform -strict` against the cluster's k8s version, `shellcheck` on `scripts/`, and
+an is-it-really-encrypted check on `secrets.enc.env`). CI (`.github/workflows/ci.yml`)
+runs exactly `make lint` on every push — validation only, it can never reach the cluster
+(no kubeconfig/SSH/age key in GitHub).
 
 ## The mental model that matters
 
@@ -34,7 +39,7 @@ The directory a file lives in determines how it reaches the cluster:
 | `platform/cert-manager/values.yaml`, `platform/headlamp/values.yaml` | Helm | `helm upgrade <release> <chart> -n <ns> -f <values.yaml>` |
 | `platform/cert-manager/clusterissuer-*.yaml`, `platform/headlamp/headlamp-login.yaml` | Plain manifest | `kubectl apply -f <file>` |
 | `platform/traefik/traefik-helmchartconfig.yaml` | k3s auto-deploy | **`scp` to ARM** `/var/lib/rancher/k3s/server/manifests/traefik-config.yaml` — NOT `kubectl` |
-| `node-config/<node>.config.yaml` | k3s node config | **template**: `make node-config` fills `__NODE_IP__` from `NODE_IP_*` in `.env` and streams it **over ssh** to `/etc/rancher/k3s/config.yaml`, then restarts k3s — NOT `kubectl` |
+| `node-config/<node>.config.yaml` | k3s node config | **template**: `make node-config` fills `__NODE_IP__` from `NODE_IP_*` in `secrets.enc.env` (decrypted via sops) and streams it **over ssh** to `/etc/rancher/k3s/config.yaml`, then restarts k3s — NOT `kubectl` |
 
 The last two are the easy traps: applying them with `kubectl` does nothing useful.
 Each subdirectory's README documents its own apply procedure and bootstrap order.
@@ -51,29 +56,39 @@ This is deliberate and load-bearing:
   the node where its data lives, so any app with a PVC must keep the arm64 nodeSelector.
 - New platform components and stateful apps should follow this pattern.
 
-**Secrets never enter git.** Real values live in a git-ignored `.env` on the control machine
-(template: `.env.example`). `scripts/apply-secrets.sh` reads `.env` and creates the
-in-cluster `Secret` objects (idempotent, via `create --dry-run=client | apply`). The script
-has **one block per app** (`cert-manager`, `wallos`, `multica`, `supabase`): with no args it
-applies every block whose `.env` vars are filled and skips the rest; `make secrets APP=<name>`
-applies just one. `make platform` depends only on the `cert-manager` block, so platform
-bootstrap never requires app secrets. Manifests reference Secrets by
-`secretKeyRef`/`apiTokenSecretRef` — Kubernetes does not read env vars directly.
-`.gitignore` blocks `.env`, `*.secret.yaml`, `*-secret.yaml`, `*.token`, `*.key`, `*.pem`,
-and kubeconfigs. Add any new secret to this flow (a new app = a new block); never inline a
-real value into a manifest. **This repo is public**: node public IPs are also treated as
-private — they live in `.env` (`NODE_IP_*`, rendered into the `node-config/` templates at
-apply time) and SSH connection details (IP/port/user/key) live only in `~/.ssh/config`;
-never commit either, in code or in docs. Supabase needs interdependent secret material (a JWT secret
-plus `anon`/`service_role` keys *signed* by it), so `scripts/supabase-gen-secrets.sh` emits a
-complete `.env` block once and `apply-secrets.sh` creates the eight `supabase-*` Secrets the
-chart references.
+**Secrets enter git only encrypted.** Every secret value — plus the private-but-not-secret
+`NODE_IP_*` node IPs — lives in `secrets.enc.env`, a SOPS+age-encrypted dotenv that IS
+committed (variable names/comments readable, every value an `ENC[...]` blob; variable
+reference: `.env.example`). The age recipient is pinned in `.sops.yaml`; the private key
+exists only on the control machine (macOS: `~/Library/Application Support/sops/age/keys.txt`)
+plus a password-manager backup — disaster recovery = repo + that key. SOPS (not Sealed
+Secrets) is deliberate: pure client-side, no in-cluster controller, fits the push model.
+Edit with `make secrets-edit` (sops decrypts into the editor, re-encrypts on save); never
+create a plaintext `.env` with real values. `scripts/apply-secrets.sh` decrypts in-memory
+(`sops -d`, hard-fails if the key is missing) and creates the in-cluster `Secret` objects
+(idempotent, via `create --dry-run=client | apply`). The script has **one block per app**
+(`cert-manager`, `wallos`, `multica`, `supabase`): with no args it applies every block whose
+vars are filled and skips the rest; `make secrets APP=<name>` applies just one.
+`make platform` depends only on the `cert-manager` block, so platform bootstrap never
+requires app secrets. Manifests reference Secrets by `secretKeyRef`/`apiTokenSecretRef` —
+Kubernetes does not read env vars directly. `.gitignore` still blocks plaintext leftovers
+(`.env`, `*.secret.yaml`, `*-secret.yaml`, `*.token`, `*.key`, `*.pem`, kubeconfigs), and
+`make lint`/CI fail if `secrets.enc.env` ever contains a plaintext value. Add any new secret
+to this flow (a new app = a new block + new vars via `make secrets-edit`); never inline a
+real value into a manifest. **This repo is public**: node public IPs are treated as private —
+committed only encrypted (`NODE_IP_*`, rendered into the `node-config/` templates at apply
+time) — and SSH connection details (IP/port/user/key) live only in `~/.ssh/config`; never
+commit either in plaintext, in code or in docs. Supabase needs interdependent secret material
+(a JWT secret plus `anon`/`service_role` keys *signed* by it), so
+`scripts/supabase-gen-secrets.sh` emits a complete dotenv block once — paste it into the
+`make secrets-edit` editor — and `apply-secrets.sh` creates the eight `supabase-*` Secrets
+the chart references.
 
 **Stateful apps get a nightly backup CronJob.** `apps/<name>/backup.yaml` dumps the app's
 state (`pg_dump`/`pg_dumpall` over the cluster network and/or a read-only tar of its PVCs)
 and uploads to Cloudflare R2 (`backups/<name>/`, 30-day retention, staggered 03:10/03:30/03:50
 Asia/Shanghai). Credentials come from the `backup-r2` Secret in the app's namespace
-(`BACKUP_R2_*` in `.env` → `apply-secrets.sh`). wallos applies it via its kustomization;
+(`BACKUP_R2_*` in `secrets.enc.env` → `apply-secrets.sh`). wallos applies it via its kustomization;
 multica/supabase apply it inside their make targets (it is NOT part of their Helm releases).
 `make backup-now APP=<name>` runs one immediately and prints the log. A new stateful app
 should ship a `backup.yaml` following the same pattern.
@@ -87,24 +102,27 @@ exactly what it runs. `make` with no args lists everything.
 ```bash
 make status                 # nodes + all pods
 make diff                   # drift preview: repo vs live cluster (applies nothing)
+make lint                   # validate manifests/charts/scripts/secrets — what CI runs (applies nothing)
 make platform               # bootstrap/refresh ALL platform components in the right order
 make cert-manager           # helm upgrade cert-manager (pinned chart) + apply its ClusterIssuer
 make headlamp               # helm upgrade headlamp (pinned chart) + apply its admin login
 make traefik                # scp the ARM-pin config to the server node
 make app APP=<name>         # kubectl apply -k apps/<name>/
 make bump APP=<name>        # show/pin a version (kustomize image, multica chart+images, or a Makefile chart pin)
-make node-config NODE=sg    # render node config from .env + push + restart k3s
+make node-config NODE=sg    # render node config (IP decrypted via sops) + push + restart k3s
+make secrets-edit           # edit secrets.enc.env (sops decrypts into the editor)
 make secrets                # ./scripts/apply-secrets.sh (APP=<name> for one app's block)
 make backup-now APP=<name>  # run an app's nightly R2 backup right now
 make headlamp-token         # print the Headlamp admin login token
 ```
 
 **Control-machine prerequisites (the easy-to-miss ones):** the control machine drives the
-cluster with `kubectl` + `helm` from Homebrew (keep kubectl within ±1 minor of the cluster,
-which runs v1.35). A fresh `helm` has **no repositories**, so `make repos` (adds `jetstack` +
-`headlamp` + `supabase`, plus the `helm-diff` plugin that `make diff` needs) is a real
-prerequisite — without it every `helm upgrade` fails to find its chart. `.env` must exist
-for `make secrets`.
+cluster with `kubectl` + `helm` + `sops` + `age` from Homebrew (keep kubectl within ±1 minor
+of the cluster, which runs v1.35). A fresh `helm` has **no repositories**, so `make repos`
+(adds `jetstack` + `headlamp` + `supabase`, plus the `helm-diff` plugin that `make diff`
+needs) is a real prerequisite — without it every `helm upgrade` fails to find its chart.
+The age private key must be in place for `make secrets` / `make node-config` (see Secrets
+above). `make lint` additionally wants `kubeconform` + `shellcheck` from Homebrew.
 
 ## Adding a new app
 
@@ -129,5 +147,6 @@ keep the arm64 nodeSelector so the pod returns to where its data lives.
 `arm` = control-plane (arm64); `amd1`, `amd2`, `sg` = agents (amd64). `sg` is tainted
 `location=singapore`. Networking is a Tailscale mesh; ingress is Traefik (pinned to ARM).
 SSH aliases (`arm`/`amd1`/`amd2`/`sg`) are defined in `~/.ssh/config` on the control
-machine; node public IPs live in `.env` as `NODE_IP_*` — neither is in the repo. The
-cluster node names (`k3s-ora-arm-1`, etc.) differ from the SSH aliases.
+machine; node public IPs live encrypted in `secrets.enc.env` as `NODE_IP_*` — neither is
+in the repo in plaintext. The cluster node names (`k3s-ora-arm-1`, etc.) differ from the
+SSH aliases.

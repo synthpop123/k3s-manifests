@@ -1,0 +1,38 @@
+# Validation only — this is a push-based repo, so CI never talks to the cluster
+# (no kubeconfig, no SSH key, no age key in GitHub). It runs the same `make lint`
+# you can run locally: kustomize builds + helm renders piped through kubeconform,
+# shellcheck on scripts/, and a hygiene check that secrets.enc.env stays encrypted.
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    # ubuntu-latest already ships kubectl, helm and shellcheck; only kubeconform
+    # needs installing. Pinned like everything else in this repo.
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Add helm repos (for lint-helm)
+        run: make helm-repos
+
+      - name: make lint
+        run: make lint

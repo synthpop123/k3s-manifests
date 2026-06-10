@@ -7,12 +7,12 @@ on the corresponding node, which the k3s service reads at startup.
 Currently each only sets `node-external-ip` so the node's public IP shows up in
 `kubectl get nodes -o wide`.
 
-**The IPs themselves never enter git.** Every file carries a `__NODE_IP__`
-placeholder; `make node-config` fills it from the matching `NODE_IP_*` variable in
-the git-ignored `.env` and streams the rendered file straight onto the node — no
-rendered copy is written locally.
+**The IPs themselves never enter git in plaintext.** Every file carries a
+`__NODE_IP__` placeholder; `make node-config` fills it from the matching `NODE_IP_*`
+variable in the sops-encrypted `secrets.enc.env` (decrypted on the fly) and streams
+the rendered file straight onto the node — no rendered copy is written locally.
 
-| File | Node (SSH alias) | Cluster node name | `.env` variable |
+| File | Node (SSH alias) | Cluster node name | `secrets.enc.env` variable |
 |---|---|---|---|
 | `arm.config.yaml`  | `arm`  | `k3s-ora-arm-1`     | `NODE_IP_ARM` |
 | `amd1.config.yaml` | `amd1` | `k3s-ora-amd-1`     | `NODE_IP_AMD1` |
@@ -22,7 +22,7 @@ rendered copy is written locally.
 ## Apply a change to a node
 
 ```bash
-make node-config NODE=sg     # render from .env, push to the node, restart k3s
+make node-config NODE=sg     # render (IP via sops -d), push to the node, restart k3s
 ```
 
 Which is equivalent to:

@@ -27,10 +27,11 @@ kustomize recipe the other apps use — so it's driven by [`values.yaml`](./valu
   real headroom (~24Gi RAM vs ~1Gi on the amd agents), so multica, the heaviest workload here,
   won't fit elsewhere. Data stays put either way: the `local-path` PVs (10Gi Postgres, 5Gi
   uploads) get node affinity to wherever they first bind, so the stateful pods return there.
-- **Secrets via `.env`.** `multica-secrets` (JWT, Postgres password, Resend key, GitHub App creds,
-  + empty optionals) is created by
-  [`../../scripts/apply-secrets.sh`](../../scripts/apply-secrets.sh) from the git-ignored `.env`;
-  the chart references it by name. `.env` vars are project-prefixed (`MULTICA_JWT_SECRET`,
+- **Secrets via `secrets.enc.env`.** `multica-secrets` (JWT, Postgres password, Resend key, GitHub
+  App creds, + empty optionals) is created by
+  [`../../scripts/apply-secrets.sh`](../../scripts/apply-secrets.sh) from the sops-encrypted
+  `secrets.enc.env` (edit with `make secrets-edit`);
+  the chart references it by name. The vars are project-prefixed (`MULTICA_JWT_SECRET`,
   `MULTICA_RESEND_API_KEY`, `MULTICA_GITHUB_*`) and the script maps them to the un-prefixed keys
   the backend actually reads (`JWT_SECRET`, `RESEND_API_KEY`, `GITHUB_*`). The chart has no
   extra-env knob, so even the non-secret GitHub `SLUG`/`APP_ID` ride in this Secret — it's the
@@ -53,7 +54,7 @@ The Let's Encrypt cert is issued via Cloudflare DNS-01, so it succeeds even befo
 ## Deploy
 
 ```bash
-make secrets                 # create multica-secrets from .env (JWT/Postgres/Resend/GitHub) — run first
+make secrets                 # create multica-secrets from secrets.enc.env (JWT/Postgres/Resend/GitHub) — run first
 make multica                 # apply cert + backup CronJob, then helm upgrade --install (waits up to 10m)
 ```
 
@@ -84,16 +85,16 @@ Then create the first workspace. Public signup is now closed —
 
 PRs whose branch/title/body mention an issue id (`MUL-123`) auto-link to that issue, and merging
 the PR flips the issue to Done. Setup is a one-time GitHub App + four env vars, all carried in
-`multica-secrets` via `.env` → `apply-secrets.sh`:
+`multica-secrets` via `secrets.enc.env` → `apply-secrets.sh`:
 
-| `.env` var | Secret key (backend reads) | Required |
+| `secrets.enc.env` var | Secret key (backend reads) | Required |
 |---|---|---|
 | `MULTICA_GITHUB_APP_SLUG` | `GITHUB_APP_SLUG` | yes |
 | `MULTICA_GITHUB_WEBHOOK_SECRET` | `GITHUB_WEBHOOK_SECRET` | yes |
 | `MULTICA_GITHUB_APP_ID` | `GITHUB_APP_ID` | optional (nicer "connected to &lt;org&gt;") |
 | `MULTICA_GITHUB_APP_PRIVATE_KEY_B64` | `GITHUB_APP_PRIVATE_KEY` | optional |
 
-The private key is a multiline PEM, so it's stored base64 on one `.env` line
+The private key is a multiline PEM, so it's stored base64 on one `secrets.enc.env` line
 (`openssl base64 -A < app.private-key.pem`) and decoded back to the raw PEM by `apply-secrets.sh`.
 
 On the **GitHub App** itself, the two URLs must point here:
@@ -111,7 +112,7 @@ already ran with the v0.3.17 deploy.
 Verify the backend loaded the secret correctly (expect `200 {"ok":"pong"}`):
 
 ```bash
-SECRET="$(sed -n 's/^MULTICA_GITHUB_WEBHOOK_SECRET=//p' .env)"
+SECRET="$(sops -d secrets.enc.env | sed -n 's/^MULTICA_GITHUB_WEBHOOK_SECRET=//p')"
 SIG=$(printf '%s' '{"zen":"test"}' | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $NF}')
 curl -i -X POST https://api.multica.lkwplus.com/api/webhooks/github \
   -H "X-Hub-Signature-256: sha256=$SIG" -H "X-GitHub-Event: ping" \
@@ -119,7 +120,7 @@ curl -i -X POST https://api.multica.lkwplus.com/api/webhooks/github \
 ```
 
 `401 invalid signature` in GitHub's *Recent Deliveries* (while this returns `200`) means the App's
-Webhook-secret field doesn't match `.env` — re-paste and **Save** on GitHub. `503 not configured`
+Webhook-secret field doesn't match `secrets.enc.env` — re-paste and **Save** on GitHub. `503 not configured`
 means the backend has no `GITHUB_WEBHOOK_SECRET` (re-run `make secrets && make multica`).
 
 ## Upgrade
@@ -145,7 +146,7 @@ both up **automatically every night** (03:30 Asia/Shanghai): an init container `
 the database over the cluster network, the main container tars the uploads PVC (read-only
 mount) and uploads both to R2 at `backups/multica/` with 30-day retention. It's applied by
 `make multica` (alongside certificate.yaml — it is NOT part of the Helm release). R2
-credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `.env` → `make secrets`).
+credentials come from the `backup-r2` Secret (`BACKUP_R2_*` in `secrets.enc.env` → `make secrets`).
 
 ```bash
 make backup-now APP=multica     # run a backup right now + print the log (lists the bucket)
@@ -171,8 +172,9 @@ helm -n multica uninstall multica     # removes workloads; keeps PVCs + multica-
 kubectl delete namespace multica      # wipes EVERYTHING (Postgres data + uploads) permanently
 ```
 
-Then drop the `multica` / `api.multica` CNAMEs, remove the multica block from `.env` /
-`.env.example` / `apply-secrets.sh`, and delete this folder + its row in [`../README.md`](../README.md).
+Then drop the `multica` / `api.multica` CNAMEs, remove the multica block from `secrets.enc.env`
+(`make secrets-edit`) / `.env.example` / `apply-secrets.sh`, and delete this folder + its row in
+[`../README.md`](../README.md).
 
 ## Troubleshooting
 
