@@ -26,7 +26,7 @@ SECRETS_FILE ?= secrets.enc.env
 
 # Pinned upstream multica chart version; bump together with the image tags in
 # apps/multica/values.yaml (see apps/multica/README.md).
-MULTICA_CHART_VERSION ?= 0.3.18
+MULTICA_CHART_VERSION ?= 0.3.19
 
 # Pinned upstream supabase chart version. The chart pins every component image tag
 # internally, so this single number controls the whole stack (see apps/supabase/README.md).

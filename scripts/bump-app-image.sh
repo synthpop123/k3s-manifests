@@ -29,6 +29,30 @@ app="${1:-}"
 version="${2:-}"
 [[ -n "$app" ]] || { echo "usage: $0 <app> [version]" >&2; exit 1; }
 
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-10}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-30}"
+CURL_RETRIES="${CURL_RETRIES:-2}"
+
+_curl() {
+  curl -fsSL \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_MAX_TIME" \
+    --retry "$CURL_RETRIES" \
+    --retry-delay 1 \
+    --retry-connrefused \
+    "$@"
+}
+
+_fetch_json() {
+  local label="$1" json
+  shift
+  if ! json="$(_curl "$@")"; then
+    echo "ERROR: failed to fetch $label" >&2
+    return 1
+  fi
+  printf '%s\n' "$json"
+}
+
 # --- registry-aware tag helpers ---------------------------------------------
 # Resolve a docker-style ref (host optional) into REG (ghcr|hub) + REPO, so the
 # rest of the script can list/verify tags without caring where the image lives.
@@ -53,32 +77,74 @@ _resolve_ref() {
 # Emit every tag for the resolved repo, one per line (order not guaranteed).
 _raw_tags() {
   if [[ "$REG" == ghcr ]]; then
-    local tok
-    tok="$(curl -fsSL "https://ghcr.io/token?scope=repository:${REPO}:pull" \
-      | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')"
-    curl -fsSL -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${REPO}/tags/list" \
-      | python3 -c 'import sys,json; print("\n".join(json.load(sys.stdin).get("tags") or []))'
+    local tok_json tok tags_json
+    tok_json="$(_fetch_json "GHCR auth token for $REPO" \
+      "https://ghcr.io/token?scope=repository:${REPO}:pull")" || return 1
+    tok="$(python3 -c 'import json, sys
+label = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    print(f"ERROR: invalid JSON from {label}: {e}", file=sys.stderr)
+    sys.exit(1)
+token = data.get("token")
+if not token:
+    print(f"ERROR: missing token in {label} response", file=sys.stderr)
+    sys.exit(1)
+print(token)' "GHCR auth token for $REPO" <<<"$tok_json")" || return 1
+    tags_json="$(_fetch_json "GHCR tags for $REPO" \
+      -H "Authorization: Bearer $tok" "https://ghcr.io/v2/${REPO}/tags/list")" || return 1
+    python3 -c 'import json, sys
+label = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    print(f"ERROR: invalid JSON from {label}: {e}", file=sys.stderr)
+    sys.exit(1)
+tags = data.get("tags") or []
+if not isinstance(tags, list):
+    print(f"ERROR: invalid tags list in {label} response", file=sys.stderr)
+    sys.exit(1)
+print("\n".join(str(t) for t in tags))' "GHCR tags for $REPO" <<<"$tags_json"
   else
-    curl -fsSL "https://hub.docker.com/v2/repositories/${REPO}/tags?page_size=100&ordering=last_updated" \
-      | python3 -c 'import sys,json; print("\n".join(t["name"] for t in json.load(sys.stdin).get("results", [])))'
+    local tags_json
+    tags_json="$(_fetch_json "Docker Hub tags for $REPO" \
+      "https://hub.docker.com/v2/repositories/${REPO}/tags?page_size=100&ordering=last_updated")" || return 1
+    python3 -c 'import json, sys
+label = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    print(f"ERROR: invalid JSON from {label}: {e}", file=sys.stderr)
+    sys.exit(1)
+results = data.get("results") or []
+if not isinstance(results, list):
+    print(f"ERROR: invalid results list in {label} response", file=sys.stderr)
+    sys.exit(1)
+print("\n".join(str(t["name"]) for t in results if isinstance(t, dict) and "name" in t))' \
+      "Docker Hub tags for $REPO" <<<"$tags_json"
   fi
 }
 
 # Print the newest <=10 plain semver (X.Y.Z, optional leading v) tags, indented.
 _show_versions() {
-  _raw_tags | python3 -c 'import sys, re
+  local tags
+  tags="$(_raw_tags)" || return 1
+  python3 -c 'import sys, re
 tags = [l.strip() for l in sys.stdin if l.strip()]
 sv = sorted({t for t in tags if re.fullmatch(r"v?\d+\.\d+\.\d+", t)},
             key=lambda s: list(map(int, s.lstrip("v").split("."))), reverse=True)
-print("\n".join("  " + t for t in sv[:10]) or "  (no plain X.Y.Z tags found)")'
+print("\n".join("  " + t for t in sv[:10]) or "  (no plain X.Y.Z tags found)")' <<<"$tags"
 }
 
 # Exit 0 if tag ($1) exists for the resolved repo, else non-zero.
 _tag_exists() {
   if [[ "$REG" == hub ]]; then
-    curl -fsSL -o /dev/null "https://hub.docker.com/v2/repositories/${REPO}/tags/$1"
+    _curl -o /dev/null "https://hub.docker.com/v2/repositories/${REPO}/tags/$1"
   else
-    _raw_tags | grep -qxF "$1"
+    local tags
+    tags="$(_raw_tags)" || return 1
+    grep -qxF "$1" <<<"$tags"
   fi
 }
 
@@ -129,7 +195,8 @@ fi
 if [[ "$app" == "multica" ]]; then
   values="apps/multica/values.yaml"
   chart_repo="ghcr.io/multica-ai/charts/multica"     # chart tags: X.Y.Z
-  image_repo="ghcr.io/multica-ai/multica-backend"    # image tags: vX.Y.Z
+  backend_repo="ghcr.io/multica-ai/multica-backend"  # image tags: vX.Y.Z
+  frontend_repo="ghcr.io/multica-ai/multica-web"     # image tags: vX.Y.Z
 
   cur_chart="$(grep -E '^MULTICA_CHART_VERSION' Makefile | sed -E 's/.*[?]=[[:space:]]*//; s/[[:space:]]*#.*//')"
   cur_img="$(grep -E '^[[:space:]]+tag:' "$values" | head -1 | sed -E 's/.*tag:[[:space:]]*//')"
@@ -157,11 +224,13 @@ if [[ "$app" == "multica" ]]; then
     echo "ERROR: chart version '$chart_ver' not found at $chart_repo" >&2
     exit 1
   fi
-  _resolve_ref "$image_repo"
-  if ! _tag_exists "$img_tag"; then
-    echo "ERROR: image tag '$img_tag' not found at $image_repo" >&2
-    exit 1
-  fi
+  for image_repo in "$backend_repo" "$frontend_repo"; do
+    _resolve_ref "$image_repo"
+    if ! _tag_exists "$img_tag"; then
+      echo "ERROR: image tag '$img_tag' not found at $image_repo" >&2
+      exit 1
+    fi
+  done
 
   if [[ "$chart_ver" == "$cur_chart" && "$img_tag" == "$cur_img" ]]; then
     echo "Already pinned to $version — nothing to do."

@@ -12,9 +12,9 @@
 # tags here and bump them in lockstep with MULTICA_CHART_VERSION (see apps/multica/README.md).
 images:
   backend:
-    tag: v0.3.18
+    tag: v0.3.19
   frontend:
-    tag: v0.3.18
+    tag: v0.3.19
 
 # = chart default; the Secret is created out-of-band by scripts/apply-secrets.sh from
 # secrets.enc.env, so JWT / Postgres / Resend values never get templated into git.
