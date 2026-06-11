@@ -34,16 +34,18 @@ The control machine is where you run `kubectl`/`helm` for this repo. To make the
 below work:
 
 ```bash
-brew install kubectl helm sops age # kubectl within ±1 minor of the cluster (v1.35)
-kubectl get nodes                  # confirm the kubeconfig points at k3s.lkwplus.com
-make repos                         # helm repos (jetstack/headlamp/supabase) + helm-diff plugin (once per machine)
+brew install kubernetes-cli helm kubeconform shellcheck sops age
+kubectl version --client # kubernetes-cli provides kubectl; keep it within ±1 minor of the cluster (v1.36)
+kubectl get nodes        # confirm the kubeconfig points at k3s.lkwplus.com
+make repos               # helm repos (jetstack/headlamp/supabase) + helm-diff plugin (once per machine)
 # restore the age private key from your password manager to:
 #   '~/Library/Application Support/sops/age/keys.txt'   (macOS; Linux: ~/.config/sops/age/keys.txt)
-brew install kubeconform shellcheck # optional: lets you run `make lint` locally (CI runs it anyway)
 ```
 
 > A fresh `helm` has no repositories, so `make repos` (or `helm repo add ...`) is a real
 > prerequisite for any `helm upgrade` below — skip it and the upgrade fails to find the chart.
+> `make repos` also installs the `helm-diff` plugin needed by `make diff`; the equivalent raw
+> command is `helm plugin install --verify=false https://github.com/databus23/helm-diff`.
 
 ### CI — validation without touching the cluster
 
@@ -143,8 +145,9 @@ into the editor opened by `make secrets-edit` — see
 
 Bootstrapping:
 
-- **Existing cluster, new machine:** `brew install sops age`, restore the age key from
-  your password manager to the path above, `git clone` — done.
+- **Existing cluster, new machine:** install the control-machine tools from the setup
+  section above, restore the age key from your password manager to the path above,
+  `git clone` — done.
 - **From zero (or lost key):** `age-keygen -o <key path above>`, put the printed
   recipient in [`.sops.yaml`](.sops.yaml), then `make secrets-edit` and fill in the
   variables listed in [`.env.example`](.env.example). Back the new key up immediately.

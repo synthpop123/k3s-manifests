@@ -12,8 +12,9 @@ they rarely change. Two mechanisms are in play:
 ## Bootstrap order (rebuild from scratch)
 
 > Assumes k3s is already installed on all nodes (see the repo root README),
-> and the one-time setup from the root README is done (`brew install kubectl helm
-> sops age`, `make repos`, the age key in place + `make secrets-edit` filled in).
+> and the one-time setup from the root README is done (`brew install kubernetes-cli
+> helm kubeconform shellcheck sops age`, `make repos`, the age key in place +
+> `make secrets-edit` filled in).
 
 The whole platform, in the correct order, is one command:
 

@@ -1,14 +1,14 @@
 # Operate the lkwplus.com k3s cluster from this Mac.
 #
 # Prereqs (one-time):
-#   - kubectl + helm + sops + age in PATH (brew install kubectl helm sops age)
+#   - kubectl + helm + kubeconform + shellcheck + sops + age in PATH:
+#       brew install kubernetes-cli helm kubeconform shellcheck sops age
 #   - kubeconfig pointing at k3s.lkwplus.com:6443  (kubectl get nodes works)
 #   - SSH aliases arm/amd1/amd2/sg in ~/.ssh/config (see README)
-#   - make repos        # add the helm repos platform/ needs
+#   - make repos        # add the helm repos + helm-diff plugin platform/ needs
 #   - the age private key at ~/.config/sops/age/keys.txt (restore it from your
 #     password manager; on a brand-new setup: age-keygen + update .sops.yaml)
-#   - `make lint` also wants kubeconform + shellcheck (brew install kubeconform
-#     shellcheck) — CI runs the same target on every push regardless.
+#   - CI runs the same `make lint` target on every push regardless.
 #
 # Run `make` with no target for the list.
 
@@ -45,7 +45,7 @@ HEADLAMP_CHART_VERSION     ?= 0.42.0
 # objects themselves are skipped: the upstream schema repo doesn't ship that
 # kind, and ours come verbatim from the cert-manager chart anyway.
 KUBECONFORM ?= kubeconform
-KUBECONFORM_K8S_VERSION ?= 1.35.0
+KUBECONFORM_K8S_VERSION ?= 1.36.1
 KUBECONFORM_FLAGS = -strict -summary -kubernetes-version $(KUBECONFORM_K8S_VERSION) \
   -skip CustomResourceDefinition \
   -schema-location default \
