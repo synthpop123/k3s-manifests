@@ -12,6 +12,36 @@ credentials and node IPs live in [`secrets.enc.env`](secrets.enc.env), encrypted
 SOPS + age (only ciphertext is committed); SSH connection details live only in
 `~/.ssh/config`.
 
+## What runs here
+
+The cluster is small on purpose: k3s provides the core Kubernetes services, Traefik handles
+public ingress, cert-manager issues TLS certificates, and this repo keeps the deployed apps
+and their pinned versions visible in git.
+
+### Platform
+
+| Component | Namespace / path | What it does | Managed by |
+|---|---|---|---|
+| k3s core add-ons | `kube-system` | CoreDNS, metrics-server, `local-path` storage, and the packaged Traefik release | k3s |
+| Traefik | `platform/traefik/` | Public HTTP/HTTPS ingress for `*.lkwplus.com`, pinned to the ARM server node | k3s `HelmChartConfig` copied by `make traefik` |
+| cert-manager | `cert-manager` | Let's Encrypt certificates through the Cloudflare DNS-01 ClusterIssuer | Helm + plain manifest via `make cert-manager` |
+| Headlamp | `headlamp` | Kubernetes web dashboard with an admin login token | Helm + plain manifest via `make headlamp` |
+| SOPS-backed Secret sync | `scripts/apply-secrets.sh` | Decrypts `secrets.enc.env` locally and creates the Kubernetes Secrets each app references | `make secrets` |
+| Nightly backups | `apps/*/backup.yaml` | Uploads stateful app backups to Cloudflare R2 and prunes old copies | Kubernetes CronJobs |
+
+### Deployed apps
+
+| App | Public entrypoint | Runtime shape | State and backup |
+|---|---|---|---|
+| [`wallos`](apps/wallos) | https://wallos.lkwplus.com | Kustomize app: PHP/Apache + SQLite, image pinned in `deployment.yaml` | Two `local-path` PVCs, nightly R2 backup at 03:10 |
+| [`multica`](apps/multica) | https://multica.lkwplus.com, API at https://api.multica.lkwplus.com | Helm app: Go backend, Next.js frontend, PostgreSQL/pgvector, chart and images pinned together | Postgres PVC + uploads PVC, nightly R2 backup at 03:30 |
+| [`supabase`](apps/supabase) | https://supabase.lkwplus.com | Helm app: Supabase stack behind Kong, including Auth, REST, Realtime, Storage, Functions, Studio, and Postgres | Database + storage PVCs, nightly R2 backup at 03:50 |
+
+All public apps use Traefik ingress and cert-manager TLS. Stateful workloads stay on the ARM
+node because the default `local-path` storage is node-local. The `apps/` directories should
+match what is actually deployed: add a folder when a service goes live, remove it when the
+service is uninstalled.
+
 ## Workflow — edit here, apply from your control machine
 
 This is a **push-based** workflow: the repo lives on your control machine (and GitHub), and
